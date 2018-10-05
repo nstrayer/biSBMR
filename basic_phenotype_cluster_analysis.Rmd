@@ -1,0 +1,112 @@
+---
+title: "Basic Clustering On PheWAS Data"
+author: "Nick Strayer"
+date: "10/5/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(knitr)
+source("biSBM.R"); ### loading and compiling biSBM function
+```
+
+## Data
+
+We're using a snapshot exported from the phewas explorer.
+
+```{r}
+network_data <- read_rds('data/testing_network_data.rds')
+network_data$edges %>% head() %>% kable()
+network_data$vertices %>% head() %>% kable()
+```
+
+
+## Running BiSBM on data
+
+```{r, cached = TRUE}
+node_clusters <- biSBM(
+  data = network_data$edges, 
+  nodeType = network_data$vertices$name %>% str_detect('case') %>% ifelse(1, 2), 
+  ka = 5,       # Number of clusters desired for cases 
+  kb = 3,       # Number of clusters desired for phenotypes
+  deg.corr = 1, # Do we correct for node degrees in the algorithm? Yes due to smaller sizes of rarer-phenotypes
+  iter = 5      # How many iterations? Algorithm picks the best one.
+);
+
+```
+
+
+## Visualizing the results
+
+
+### Network
+
+First we can view this as a network diagram colored by cluster membership.
+
+```{r}
+colors <- c('#8dd3c7','#bebada','#fb8072','#80b1d3','#fdb462','#b3de69','#fccde5','#d9d9d9','#bc80bd','#ccebc5')
+new_node_colors <- purrr::map_chr(node_clusters, ~colors[.])
+
+list(
+  edges = network_data$edges,
+  vertices = network_data$vertices %>% mutate(color = new_node_colors)
+) %>% 
+  jsonlite::toJSON() %>%
+  r2d3::r2d3(
+    script = 'd3_plots/network_2d.js',
+    container = 'div',
+    dependencies = "d3-jetpack",
+    options = list(
+      just_snp = FALSE, 
+      msg_loc = 'message'
+    )
+  )
+```
+
+
+### Phenotype Profiles of Case Clusters
+
+Next, we can look at the phenotype profiles by cluster membership. 
+
+We first need to make a helper dataframe containing the new clusters. 
+```{r}
+clustered_vertices <- network_data$vertices %>% 
+  mutate(
+    type = ifelse(str_detect(name,'case'), 'case', 'phenotype'),
+    cluster = as.integer(node_clusters)
+  ) %>% 
+  select(index, name, type, cluster, snp_status, tooltip) 
+```
+
+Now we can use this to construct a bar chart for each cluster of their phenotype entries. 
+
+```{r}
+phenotype_vertices <- network_data$vertices %>% filter(!str_detect(name,'case'))
+
+get_phenotype_vec <- function(index){
+  network_data$edges %>% 
+    filter(source == index) %>% 
+    mutate(target = as.integer(target)) %>% 
+    left_join(phenotype_vertices, by = c('target' = 'id')) %>% 
+    select(source, phenotype = name)
+}
+
+phenotypes_by_cluster <- clustered_vertices %>% 
+  filter(type == 'case') %>%
+  .$index %>%    
+  purrr::map_df(get_phenotype_vec) %>% 
+  mutate(source = as.integer(source)) %>% 
+  inner_join(clustered_vertices %>% select(index, cluster), by = c('source' = 'index'))
+  
+
+phenotypes_by_cluster %>% 
+  ggplot(aes(x = phenotype)) +
+  geom_bar() +
+  facet_grid(cluster~.) +
+  ggtitle('Phenotype Profiles of Case Clusters')
+```
+
+
+
